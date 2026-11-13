@@ -4,7 +4,7 @@ There are 5 insertion points. Each block is labelled with exactly where it goes.
 
 ---
 
-1. Add the table — inside the existing db.exec(\...`)` block
+1. Add the table — inside the existing db.exec(/...`)` block
 
 Find the line CREATE INDEX IF NOT EXISTS idx_installs_store ON app_installs(store_id); and add this table right above it:
 
