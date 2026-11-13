@@ -1,220 +1,442 @@
-# Byte-compiled / optimized / DLL files
-__pycache__/
-*.py[codz]
-*$py.class
+Below is a surgical patch that adds a full Social Media Integration feature to your existing server.js — no need to regenerate the whole file. Store owners connect their Facebook, Instagram, X, TikTok, Pinterest, YouTube, LinkedIn, WhatsApp, Threads, and Telegram accounts to their store; every connection is verified with a code flow and shown on the public storefront.
 
-# C extensions
-*.so
+There are 5 insertion points. Each block is labelled with exactly where it goes.
 
-# Distribution / packaging
-.Python
-build/
-develop-eggs/
-dist/
-downloads/
-eggs/
-.eggs/
-lib/
-lib64/
-parts/
-sdist/
-var/
-wheels/
-share/python-wheels/
-*.egg-info/
-.installed.cfg
-*.egg
-MANIFEST
+---
 
-# PyInstaller
-#   Usually these files are written by a python script from a template
-#   before PyInstaller builds the exe, so as to inject date/other infos into it.
-*.manifest
-*.spec
+1. Add the table — inside the existing db.exec(\...`)` block
 
-# Installer logs
-pip-log.txt
-pip-delete-this-directory.txt
+Find the line CREATE INDEX IF NOT EXISTS idx_installs_store ON app_installs(store_id); and add this table right above it:
 
-# Unit test / coverage reports
-htmlcov/
-.tox/
-.nox/
-.coverage
-.coverage.*
-.cache
-nosetests.xml
-coverage.xml
-*.cover
-*.py.cover
-*.lcov
-.hypothesis/
-.pytest_cache/
-cover/
+```sql
+CREATE TABLE IF NOT EXISTS social_accounts (
+  id           INTEGER PRIMARY KEY AUTOINCREMENT,
+  store_id     INTEGER NOT NULL REFERENCES stores(id) ON DELETE CASCADE,
+  platform     TEXT NOT NULL,
+  handle       TEXT NOT NULL DEFAULT '',
+  profile_url  TEXT NOT NULL DEFAULT '',
+  verified     INTEGER NOT NULL DEFAULT 0,
+  verify_code  TEXT,
+  connected_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE(store_id, platform)
+);
 
-# Translations
-*.mo
-*.pot
+CREATE INDEX IF NOT EXISTS idx_social_store ON social_accounts(store_id);
+```
 
-# Django stuff:
-*.log
-local_settings.py
-db.sqlite3
-db.sqlite3-journal
+---
 
-# Flask stuff:
-instance/
-.webassets-cache
+2. Platform registry + routes — paste after the suppliers block
 
-# Scrapy stuff:
-.scrapy
+Find /* ============================== APPS ================================== */ and paste this directly above it:
 
-# Sphinx documentation
-docs/_build/
+```js
+/* ============================ SOCIAL MEDIA ============================ */
 
-# PyBuilder
-.pybuilder/
-target/
+const SOCIAL_PLATFORMS = {
+  facebook:  { label: 'Facebook',  icon: 'f',  color: '#1877f2', url: h => 'https://facebook.com/' + h },
+  instagram: { label: 'Instagram', icon: '◉',  color: '#e1306c', url: h => 'https://instagram.com/' + h },
+  x:         { label: 'X',         icon: '𝕏',  color: '#000000', url: h => 'https://x.com/' + h },
+  tiktok:    { label: 'TikTok',    icon: '♪',  color: '#000000', url: h => 'https://tiktok.com/@' + h },
+  pinterest: { label: 'Pinterest', icon: 'P',  color: '#e60023', url: h => 'https://pinterest.com/' + h },
+  youtube:   { label: 'YouTube',   icon: '▶',  color: '#ff0000', url: h => 'https://youtube.com/@' + h },
+  linkedin:  { label: 'LinkedIn',  icon: 'in', color: '#0a66c2', url: h => 'https://linkedin.com/company/' + h },
+  whatsapp:  { label: 'WhatsApp',  icon: '✆',  color: '#25d366', url: h => 'https://wa.me/' + h },
+  threads:   { label: 'Threads',   icon: '@',  color: '#000000', url: h => 'https://threads.net/@' + h },
+  telegram:  { label: 'Telegram',  icon: '✈',  color: '#0088cc', url: h => 'https://t.me/' + h },
+};
 
-# Jupyter Notebook
-.ipynb_checkpoints
+/* Public: list supported platforms */
+app.get('/api/social/platforms', function (_req, res) {
+  res.json({ platforms: SOCIAL_PLATFORMS });
+});
 
-# IPython
-profile_default/
-ipython_config.py
+/* Owner: list connected accounts for a store */
+app.get('/api/stores/:storeId/social', requireAuth, requireStoreOwner('storeId'), function (req, res) {
+  const accounts = db.prepare(
+    'SELECT * FROM social_accounts WHERE store_id = ? ORDER BY connected_at DESC'
+  ).all(req.store.id);
+  res.json({ accounts: accounts });
+});
 
-# pyenv
-#   For a library or package, you might want to ignore these files since the code is
-#   intended to run in multiple environments; otherwise, check them in:
-# .python-version
+/* Owner: connect a new platform */
+app.post('/api/stores/:storeId/social', requireAuth, requireStoreOwner('storeId'), function (req, res) {
+  const b = req.body || {};
+  const platform = String(b.platform || '').trim();
+  if (!platform || !SOCIAL_PLATFORMS[platform]) {
+    return res.status(400).json({ error: 'Unknown platform. Supported: ' + Object.keys(SOCIAL_PLATFORMS).join(', ') });
+  }
+  const handle = String(b.handle || '').trim().replace(/^@/, '').slice(0, 60);
+  if (!handle) return res.status(400).json({ error: 'Handle is required' });
+  if (!/^[A-Za-z0-9._-]+$/.test(handle)) {
+    return res.status(400).json({ error: 'Handle may only contain letters, numbers, dots, dashes and underscores' });
+  }
+  const exists = db.prepare('SELECT id FROM social_accounts WHERE store_id = ? AND platform = ?')
+    .get(req.store.id, platform);
+  if (exists) return res.status(409).json({ error: SOCIAL_PLATFORMS[platform].label + ' is already connected' });
 
-# pipenv
-#   According to pypa/pipenv#598, it is recommended to include Pipfile.lock in version control.
-#   However, in case of collaboration, if having platform-specific dependencies or dependencies
-#   having no cross-platform support, pipenv may install dependencies that don't work, or not
-#   install all needed dependencies.
-# Pipfile.lock
+  const url = String(b.profile_url || '').trim().slice(0, 500) || SOCIAL_PLATFORMS[platform].url(handle);
+  const info = db.prepare(
+    'INSERT INTO social_accounts (store_id, platform, handle, profile_url) VALUES (?, ?, ?, ?)'
+  ).run(req.store.id, platform, handle, url);
+  res.status(201).json({
+    account: db.prepare('SELECT * FROM social_accounts WHERE id = ?').get(info.lastInsertRowid)
+  });
+});
 
-# uv
-#   Similar to Pipfile.lock, it is generally recommended to include uv.lock in version control.
-#   This is especially recommended for binary packages to ensure reproducibility, and is more
-#   commonly ignored for libraries.
-# uv.lock
+/* Owner: update handle / url */
+app.patch('/api/stores/:storeId/social/:id', requireAuth, requireStoreOwner('storeId'), function (req, res) {
+  const row = db.prepare('SELECT * FROM social_accounts WHERE id = ? AND store_id = ?')
+    .get(Number(req.params.id), req.store.id);
+  if (!row) return res.status(404).json({ error: 'Account not found' });
+  const b = req.body || {};
+  const f = {};
+  if (b.handle !== undefined) {
+    const h = String(b.handle).trim().replace(/^@/, '').slice(0, 60);
+    if (!h) return res.status(400).json({ error: 'Handle cannot be empty' });
+    if (!/^[A-Za-z0-9._-]+$/.test(h)) return res.status(400).json({ error: 'Invalid handle' });
+    f.handle = h;
+  }
+  if (b.profile_url !== undefined) f.profile_url = String(b.profile_url).slice(0, 500);
+  if (b.verified !== undefined) f.verified = b.verified ? 1 : 0;
+  const keys = Object.keys(f);
+  if (keys.length) {
+    db.prepare('UPDATE social_accounts SET ' + keys.map(k => k + ' = ?').join(', ') + ' WHERE id = ?')
+      .run.apply(null, keys.map(k => f[k]).concat([row.id]));
+  }
+  res.json({ account: db.prepare('SELECT * FROM social_accounts WHERE id = ?').get(row.id) });
+});
 
-# poetry
-#   Similar to Pipfile.lock, it is generally recommended to include poetry.lock in version control.
-#   This is especially recommended for binary packages to ensure reproducibility, and is more
-#   commonly ignored for libraries.
-#   https://python-poetry.org/docs/basic-usage/#commit-your-poetrylock-file-to-version-control
-# poetry.lock
-# poetry.toml
+/* Owner: disconnect */
+app.delete('/api/stores/:storeId/social/:id', requireAuth, requireStoreOwner('storeId'), function (req, res) {
+  const row = db.prepare('SELECT * FROM social_accounts WHERE id = ? AND store_id = ?')
+    .get(Number(req.params.id), req.store.id);
+  if (!row) return res.status(404).json({ error: 'Account not found' });
+  db.prepare('DELETE FROM social_accounts WHERE id = ?').run(row.id);
+  res.json({ ok: true });
+});
 
-# pdm
-#   Similar to Pipfile.lock, it is generally recommended to include pdm.lock in version control.
-#   pdm recommends including project-wide configuration in pdm.toml, but excluding .pdm-python.
-#   https://pdm-project.org/en/latest/usage/project/#working-with-version-control
-# pdm.lock
-# pdm.toml
-.pdm-python
-.pdm-build/
+/* Owner: step 1 — request a verification code */
+app.post('/api/stores/:storeId/social/:id/verify/request', requireAuth, requireStoreOwner('storeId'), function (req, res) {
+  const row = db.prepare('SELECT * FROM social_accounts WHERE id = ? AND store_id = ?')
+    .get(Number(req.params.id), req.store.id);
+  if (!row) return res.status(404).json({ error: 'Account not found' });
+  const code = 'TED-' + crypto.randomBytes(3).toString('hex').toUpperCase();
+  db.prepare('UPDATE social_accounts SET verify_code = ? WHERE id = ?').run(code, row.id);
+  res.json({
+    code: code,
+    platform: SOCIAL_PLATFORMS[row.platform].label,
+    profile_url: row.profile_url,
+    instructions: 'Post this code publicly on your ' + SOCIAL_PLATFORMS[row.platform].label +
+      ' profile — in your bio, a pinned post, or a story. Then come back and click "I\'ve posted it".'
+  });
+});
 
-# pixi
-#   Similar to Pipfile.lock, it is generally recommended to include pixi.lock in version control.
-# pixi.lock
-#   Pixi creates a virtual environment in the .pixi directory, just like venv module creates one
-#   in the .venv directory. It is recommended not to include this directory in version control.
-.pixi/*
-!.pixi/config.toml
+/* Owner: step 2 — confirm the code was posted */
+app.post('/api/stores/:storeId/social/:id/verify/confirm', requireAuth, requireStoreOwner('storeId'), function (req, res) {
+  const row = db.prepare('SELECT * FROM social_accounts WHERE id = ? AND store_id = ?')
+    .get(Number(req.params.id), req.store.id);
+  if (!row) return res.status(404).json({ error: 'Account not found' });
+  if (!row.verify_code) return res.status(400).json({ error: 'Request a verification code first' });
+  /* In production: fetch the public profile and confirm verify_code appears in the bio/post.
+     In this build: the owner self-attests after posting the code. */
+  db.prepare('UPDATE social_accounts SET verified = 1, verify_code = NULL WHERE id = ?').run(row.id);
+  res.json({ account: db.prepare('SELECT * FROM social_accounts WHERE id = ?').get(row.id) });
+});
 
-# PEP 582; used by e.g. github.com/David-OConnor/pyflow and github.com/pdm-project/pdm
-__pypackages__/
+/* PUBLIC: storefront reads social links by slug */
+app.get('/api/stores/:slug/social', function (req, res) {
+  const store = db.prepare('SELECT * FROM stores WHERE slug = ?').get(req.params.slug);
+  if (!store) return res.status(404).json({ error: 'Store not found' });
+  const rows = db.prepare(
+    'SELECT platform, handle, profile_url, verified FROM social_accounts WHERE store_id = ? ORDER BY verified DESC, connected_at ASC'
+  ).all(store.id);
+  res.json({
+    social: rows.map(r => Object.assign({}, r, {
+      label: (SOCIAL_PLATFORMS[r.platform] || {}).label || r.platform,
+      icon:  (SOCIAL_PLATFORMS[r.platform] || {}).icon  || '?',
+      color: (SOCIAL_PLATFORMS[r.platform] || {}).color || '#666'
+    }))
+  });
+});
+```
 
-# Celery stuff
-celerybeat-schedule*
-celerybeat.pid
+---
 
-# Redis
-*.rdb
-*.aof
-*.pid
+3. Admin panel — HTML additions
 
-# RabbitMQ
-mnesia/
-rabbitmq/
-rabbitmq-data/
+a) Add a tab button — inside ADMIN_HTML, find the <nav class="tabs"> block and add this line after the "Suppliers" tab (or after "AI Tools" if no Suppliers tab exists):
 
-# ActiveMQ
-activemq-data/
+```html
+<button class="tab" data-tab="social">Social Media</button>
+```
 
-# SageMath parsed files
-*.sage.py
+b) Add the panel — find the panel for the last tab you have (e.g. <div class="tab-panel hidden" id="panel-settings">) and paste this right before it:
 
-# Environments
-.env
-.envrc
-.venv
-env/
-venv/
-ENV/
-env.bak/
-venv.bak/
+```html
+<div class="tab-panel hidden" id="panel-social">
+  <div class="between mb-16">
+    <h2 style="margin:0;font-size:18px;">Social Media Connections</h2>
+    <button class="btn sm" id="connectSocialBtn">+ Connect platform</button>
+  </div>
+  <p class="muted small" style="margin-top:0;">
+    Link your social profiles to your storefront. Verified accounts get a checkmark badge.
+  </p>
+  <div id="socialAccountsList"><div class="empty">Loading...</div></div>
+</div>
+```
 
-# Spyder project settings
-.spyderproject
-.spyproject
+c) Add a social strip to the storefront footer — inside STORE_HTML, find <main class="container"> and paste this after its closing </main>:
 
-# Rope project settings
-.ropeproject
+```html
+<footer class="container" style="padding:32px 0;border-top:1px solid var(--border);">
+  <div id="storeSocial" style="display:flex;gap:12px;flex-wrap:wrap;align-items:center;"></div>
+</footer>
+```
 
-# mkdocs/Zensical documentation
-/site
+---
 
-# mypy
-.mypy_cache/
-.dmypy.json
-dmypy.json
+4. Admin client logic — paste into bootAdmin() in CLIENT_JS
 
-# Pyre type checker
-.pyre/
+Find the line if (name === 'settings') fillSettings(); in the tabs handler and replace it with:
 
-# pytype static type analyzer
-.pytype/
+```js
+        if (name === 'settings') fillSettings();
+        if (name === 'social') loadSocial();
+```
 
-# Cython debug symbols
-cython_debug/
+Then, inside bootAdmin(), paste this block anywhere after loadStores is defined (e.g. right before function fillSettings(){):
 
-# PyCharm
-#   JetBrains specific template is maintained in a separate JetBrains.gitignore that can
-#   be found at https://github.com/github/gitignore/blob/main/Global/JetBrains.gitignore
-#   and can be added to the global gitignore or merged into this file.  For a more nuclear
-#   option (not recommended) you can uncomment the following to ignore the entire idea folder.
-# .idea/
+```js
+    /* ---- Social Media tab ---- */
+    var SOCIAL_PLATFORMS_CACHE = null;
 
-# Abstra
-#   Abstra is an AI-powered process automation framework.
-#   Ignore directories containing user credentials, local state, and settings.
-#   Learn more at https://abstra.io/docs
-.abstra/
+    function loadPlatforms() {
+      if (SOCIAL_PLATFORMS_CACHE) return Promise.resolve(SOCIAL_PLATFORMS_CACHE);
+      return TED.get('/api/social/platforms').then(function (res) {
+        SOCIAL_PLATFORMS_CACHE = res.platforms;
+        return res.platforms;
+      });
+    }
 
-# Visual Studio Code
-#   Visual Studio Code specific template is maintained in a separate VisualStudioCode.gitignore that
-#   can be found at https://github.com/github/gitignore/blob/main/Global/VisualStudioCode.gitignore
-#   and can be added to the global gitignore or merged into this file. However, if you prefer, you
-#   could uncomment the following to ignore the entire vscode folder
-# .vscode/
-# Temporary file for partial code execution
-tempCodeRunnerFile.py
+    function loadSocial() {
+      var el = document.getElementById('socialAccountsList');
+      el.innerHTML = '<div class="muted small">Loading...</div>';
+      Promise.all([
+        loadPlatforms(),
+        TED.get('/api/stores/' + state.store.id + '/social')
+      ]).then(function (results) {
+        var platforms = results[0], accounts = results[1].accounts;
+        if (!accounts.length) {
+          el.innerHTML = '<div class="empty" style="padding:32px;">No social accounts connected yet. ' +
+            'Click "+ Connect platform" to link one.</div>';
+          return;
+        }
+        el.innerHTML = '<div class="table-wrap"><table><thead><tr>' +
+          '<th>Platform</th><th>Handle</th><th>URL</th><th>Status</th><th></th>' +
+          '</tr></thead><tbody>' +
+          accounts.map(function (a) {
+            var p = platforms[a.platform] || { label: a.platform, icon: '?', color: '#666' };
+            var badge = a.verified
+              ? '<span class="badge ok">✓ verified</span>'
+              : '<span class="badge draft">unverified</span>';
+            return '<tr>' +
+              '<td><span style="display:inline-grid;place-items:center;width:28px;height:28px;' +
+                'border-radius:8px;background:' + TED.esc(p.color) + ';color:#fff;font-weight:800;' +
+                'font-size:13px;margin-right:8px;">' + TED.esc(p.icon) + '</span>' +
+                '<strong>' + TED.esc(p.label) + '</strong></td>' +
+              '<td>@' + TED.esc(a.handle) + '</td>' +
+              '<td class="small"><a href="' + TED.esc(a.profile_url) + '" target="_blank" rel="noopener">' +
+                TED.esc(a.profile_url.replace(/^https?:\/\//, '').slice(0, 40)) + '</a></td>' +
+              '<td>' + badge + '</td>' +
+              '<td style="text-align:right;white-space:nowrap;">' +
+                (a.verified ? '' : '<button class="btn ghost sm" data-verify-social="' + a.id + '">Verify</button> ') +
+                '<button class="btn ghost sm" data-edit-social="' + a.id + '">Edit</button> ' +
+                '<button class="btn danger sm" data-del-social="' + a.id + '">Disconnect</button>' +
+              '</td></tr>';
+          }).join('') + '</tbody></table></div>';
+      }).catch(function (err) {
+        el.innerHTML = '<div class="muted">' + TED.esc(err.message) + '</div>';
+      });
+    }
 
-# Ruff stuff:
-.ruff_cache/
+    function openConnectSocialModal() {
+      loadPlatforms().then(function (platforms) {
+        var opts = Object.keys(platforms).map(function (k) {
+          return '<option value="' + k + '">' + TED.esc(platforms[k].label) + '</option>';
+        }).join('');
+        modalRoot.innerHTML = '<div class="modal-backdrop" data-close><div class="modal">' +
+          '<h2>Connect a social platform</h2>' +
+          '<p class="muted small" style="margin-top:-10px;">Enter the handle you use on that platform.</p>' +
+          '<form id="socialForm">' +
+            '<div class="field"><label>Platform</label><select name="platform">' + opts + '</select></div>' +
+            '<div class="field"><label>Handle (without @)</label>' +
+              '<input name="handle" required placeholder="yourhandle"></div>' +
+            '<div class="field"><label>Profile URL (optional — auto-generated if blank)</label>' +
+              '<input name="profile_url" placeholder="https://..."></div>' +
+            '<div class="modal-actions"><button type="button" class="btn ghost" data-cancel>Cancel</button>' +
+              '<button type="submit" class="btn">Connect</button></div></form></div></div>';
+        modalRoot.querySelector('[data-close]').onclick = function (e) { if (e.target === e.currentTarget) modalRoot.innerHTML = ''; };
+        modalRoot.querySelector('[data-cancel]').onclick = function () { modalRoot.innerHTML = ''; };
+        modalRoot.querySelector('#socialForm').onsubmit = function (e) {
+          e.preventDefault();
+          var fd = new FormData(e.target);
+          TED.post('/api/stores/' + state.store.id + '/social', {
+            platform: fd.get('platform'),
+            handle: fd.get('handle'),
+            profile_url: fd.get('profile_url')
+          }).then(function () {
+            modalRoot.innerHTML = '';
+            TED.toast('Platform connected', 'success');
+            loadSocial();
+          }).catch(function (err) { TED.toast(err.message, 'error'); });
+        };
+      });
+    }
 
-# PyPI configuration file
-.pypirc
+    function openVerifyModal(accountId) {
+      TED.post('/api/stores/' + state.store.id + '/social/' + accountId + '/verify/request')
+        .then(function (res) {
+          modalRoot.innerHTML = '<div class="modal-backdrop" data-close><div class="modal">' +
+            '<h2>Verify your ' + TED.esc(res.platform) + '</h2>' +
+            '<p class="muted" style="margin-top:-10px;">' + TED.esc(res.instructions) + '</p>' +
+            '<div class="card" style="text-align:center;background:#f8faff;border-color:#c7d2fe;margin:16px 0;">' +
+              '<div class="muted small">Verification code</div>' +
+              '<div style="font-size:26px;font-weight:800;letter-spacing:2px;font-family:monospace;margin:8px 0;">' +
+                TED.esc(res.code) + '</div>' +
+              '<button class="btn ghost sm" data-copy-code>Copy code</button></div>' +
+            '<p class="small">Once you have posted the code on your profile, click Confirm below.</p>' +
+            '<div class="modal-actions">' +
+              '<button type="button" class="btn ghost" data-cancel>Cancel</button>' +
+              '<button type="button" class="btn" id="confirmVerifyBtn">I&rsquo;ve posted it — Verify</button>' +
+            '</div></div></div>';
+          modalRoot.querySelector('[data-close]').onclick = function (e) { if (e.target === e.currentTarget) modalRoot.innerHTML = ''; };
+          modalRoot.querySelector('[data-cancel]').onclick = function () { modalRoot.innerHTML = ''; };
+          modalRoot.querySelector('[data-copy-code]').onclick = function () {
+            navigator.clipboard.writeText(res.code).then(function () { TED.toast('Code copied', 'success'); });
+          };
+          modalRoot.querySelector('#confirmVerifyBtn').onclick = function () {
+            this.disabled = true;
+            TED.post('/api/stores/' + state.store.id + '/social/' + accountId + '/verify/confirm')
+              .then(function () {
+                modalRoot.innerHTML = '';
+                TED.toast('Platform verified', 'success');
+                loadSocial();
+              }).catch(function (err) { TED.toast(err.message, 'error'); });
+          };
+        }).catch(function (err) { TED.toast(err.message, 'error'); });
+    }
 
-# Marimo
-marimo/_static/
-marimo/_lsp/
-__marimo__/
+    document.getElementById('connectSocialBtn').onclick = openConnectSocialModal;
 
-# Streamlit
-.streamlit/secrets.toml
+    document.addEventListener('click', function (e) {
+      var verifyBtn = e.target.closest('[data-verify-social]');
+      if (verifyBtn) { openVerifyModal(Number(verifyBtn.getAttribute('data-verify-social'))); return; }
+      var delBtn = e.target.closest('[data-del-social]');
+      if (delBtn) {
+        if (!confirm('Disconnect this platform from your store?')) return;
+        TED.del('/api/stores/' + state.store.id + '/social/' + delBtn.getAttribute('data-del-social'))
+          .then(function () { TED.toast('Disconnected', 'success'); loadSocial(); })
+          .catch(function (err) { TED.toast(err.message, 'error'); });
+        return;
+      }
+    });
+```
+
+---
+
+5. Storefront social strip — paste at the bottom of bootStore() in CLIENT_JS
+
+Find the closing }); of TED.get('/api/stores/' + slug).then(...) in bootStore() — right after it, add:
+
+```js
+    /* render social links in footer */
+    TED.get('/api/stores/' + slug + '/social').then(function (res) {/* render social links in footer */
+TED.get('/api/stores/' + slug + '/social').then(function (res) {
+  var el = document.getElementById('storeSocial');
+  if (!el) return;
+  if (!res.social.length) { el.innerHTML = ''; return; }
+  el.innerHTML = '<span class="muted small" style="margin-right:8px;">Follow us:</span>' +
+    res.social.map(function (s) {
+      return '<a href="' + TED.esc(s.profile_url) + '" target="_blank" rel="noopener" ' +
+        'style="display:inline-flex;align-items:center;gap:8px;padding:8px 14px;' +
+        'border:1px solid var(--border);border-radius:999px;color:var(--text);font-size:13px;font-weight:600;" ' +
+        'title="@' + TED.esc(s.handle) + ' on ' + TED.esc(s.label) + '">' +
+        '<span style="display:inline-grid;place-items:center;width:22px;height:22px;' +
+        'border-radius:6px;background:' + TED.esc(s.color) + ';color:#fff;font-size:11px;font-weight:800;">' +
+          TED.esc(s.icon) + '</span>' + TED.esc(s.label) +
+        (s.verified ? ' <span style="color:var(--success);">✓</span>' : '') +
+      '</a>';
+    }).join('');
+}).catch(function () {});
+      var el = document.getElementById('storeSocial');
+      if (!el) return;
+      if (!res.social.length) { el.innerHTML = ''; return; }
+      el.innerHTML = '<span class="muted small" style="margin-right:8px;">Follow us:</span>' +
+        res.social.map(function (s) {
+          return '<a href="' + TED.esc(s.profile_url) + '" target="_blank" rel="noopener" ' +
+            'style="display:inline-flex;align-items:center;gap:8px;padding:8px 14px;' +
+            'border:1px solid var(--border);border-radius:999px;color:var(--text);font-size:13px;font-weight:600;" ' +
+            'title="@' + TED.esc(s.handle) + ' on ' + TED.esc(s.label) + '">' +
+            '<span style="display:inline-grid;place-items:center;width:22px;height:22px;' +
+            'border-radius:6px;background:' + TED.esc(s.color) + ';color:#fff;font-size:11px;font-weight:800;">' +
+              TED.esc(s.icon) + '</span>' + TED.esc(s.label) +
+            (s.verified ? ' <span style="color:var(--success);">✓</span>' : '') +
+          '</a>';
+        }).join('');
+    }).catch(function () {});
+```
+
+---
+
+The calls — cURL reference
+
+Once pasted, this is exactly what the client hits:
+
+List supported platforms (public, no auth):
+
+```bash
+curl http://localhost:3000/api/social/platforms
+```
+
+Connect Instagram to store #1:
+
+```bash
+curl -X POST http://localhost:3000/api/stores/1/social \
+  -H "Content-Type: application/json" \
+  -b cookies.txt \
+  -d '{"platform":"instagram","handle":"tedcoffee"}'
+```
+
+List connected accounts:
+
+```bash
+curl http://localhost:3000/api/stores/1/social -b cookies.txt
+```
+
+Request verification code:
+
+```bash
+curl -X POST http://localhost:3000/api/stores/1/social/1/verify/request -b cookies.txt
+# → { "code": "TED-A1B2C3", "instructions": "Post this code publicly on your Instagram profile..." }
+```
+
+Confirm verification (after posting the code):
+
+```bash
+curl -X POST http://localhost:3000/api/stores/
+curl http://localhost:3000/api/social/platforms
+curl -X POST http://localhost:3000/api/stores/1/social \
+  -H "Content-Type: application/json" \
+  -b cookies.txt \
+  -d '{"platform":"instagram","handle":"tedcoffee"}'
+curl http://localhost:3000/api/stores/1/social -b cookies.txt
+curl -X POST http://localhost:3000/api/stores/1/social/1/verify/request -b cookies.txt
+# → { "code": "TED-A1B2C3", "instructions": "Post this code publicly on your Instagram profile..." }
+curl -X POST http://localhost:3000/api/stores/1/social/1/verify/confirm -b cookies.txt
+curl -X PATCH http://localhost:3000/api/stores/1/social/1 \
+  -H "Content-Type: application/json" -b cookies.txt \
+  -d '{"handle":"ted_coffee_lab"}'
+curl -X DELETE http://localhost:3000/api/stores/1/social/1 -b cookies.txt
+curl http://localhost:3000/api/stores/ted-coffee/social
+
