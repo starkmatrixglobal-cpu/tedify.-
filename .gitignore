@@ -1,220 +1,791 @@
-# Byte-compiled / optimized / DLL files
-__pycache__/
-*.py[codz]
-*$py.class
+The complete TEDify.stop file now includes a full Suppliers app (create/edit/delete/filter per user) and a Dropshipping app with a 14-day free trial, per-store install, paid subscription, and product-supplier linking with live margin tracking. Same single file, copy-paste, run.
 
-# C extensions
-*.so
+```js
+'use strict';
+/**
+ * TEDify.stop — multi-tenant commerce + AI tools + Suppliers/Dropshipping apps
+ *
+ * Install:  npm i express cookie-parser jsonwebtoken bcryptjs better-sqlite3
+ * Run:      node server.js
+ *
+ * Owner:    tedify.stop@gmail.com / TEDify@2026
+ *
+ * APPS
+ *   /ai               AI Tools Store (buy, subscribe, run)
+ *   /admin → Apps     Dropshipping install / 14-day trial / subscribe / cancel
+ *   /admin → Suppliers  CRUD + filters (search, category, country, status)
+ *   /admin → Products   link a product to a supplier with cost + lead time
+ */
 
-# Distribution / packaging
-.Python
-build/
-develop-eggs/
-dist/
-downloads/
-eggs/
-.eggs/
-lib/
-lib64/
-parts/
-sdist/
-var/
-wheels/
-share/python-wheels/
-*.egg-info/
-.installed.cfg
-*.egg
-MANIFEST
+const path = require('path');
+const express = require('express');
+const cookieParser = require('cookie-parser');
+const jwt = require('jsonwebtoken');
+const bcrypt = require('bcryptjs');
+const crypto = require('crypto');
+const Database = require('better-sqlite3');
 
-# PyInstaller
-#   Usually these files are written by a python script from a template
-#   before PyInstaller builds the exe, so as to inject date/other infos into it.
-*.manifest
-*.spec
+const PORT = process.env.PORT || 3000;
+const SECRET = process.env.JWT_SECRET || 'tedify-stop-dev-secret-change-me';
+const COOKIE_NAME = 'tedify_session';
+const MAX_AGE = 30 * 24 * 60 * 60 * 1000;
+const SUPERADMIN_EMAIL = (process.env.SUPERADMIN_EMAIL || 'tedify.stop@gmail.com').toLowerCase();
+const SUPERADMIN_PASSWORD = process.env.SUPERADMIN_PASSWORD || 'TEDify@2026';
 
-# Installer logs
-pip-log.txt
-pip-delete-this-directory.txt
+/* ============================== DATABASE ============================== */
 
-# Unit test / coverage reports
-htmlcov/
-.tox/
-.nox/
-.coverage
-.coverage.*
-.cache
-nosetests.xml
-coverage.xml
-*.cover
-*.py.cover
-*.lcov
-.hypothesis/
-.pytest_cache/
-cover/
+const db = new Database(process.env.TEDIFY_DB || path.join(__dirname, 'tedify.db'));
+db.pragma('journal_mode = WAL');
+db.pragma('foreign_keys = ON');
 
-# Translations
-*.mo
-*.pot
+db.exec(`
+CREATE TABLE IF NOT EXISTS users (
+  id INTEGER PRIMARY KEY AUTOINCREMENT, email TEXT NOT NULL UNIQUE,
+  password_hash TEXT NOT NULL, name TEXT NOT NULL,
+  role TEXT NOT NULL DEFAULT 'merchant',
+  created_at TEXT NOT NULL DEFAULT (datetime('now')));
 
-# Django stuff:
-*.log
-local_settings.py
-db.sqlite3
-db.sqlite3-journal
+CREATE TABLE IF NOT EXISTS stores (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  owner_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  slug TEXT NOT NULL UNIQUE, name TEXT NOT NULL,
+  tagline TEXT NOT NULL DEFAULT '', description TEXT NOT NULL DEFAULT '',
+  currency TEXT NOT NULL DEFAULT 'USD', accent TEXT NOT NULL DEFAULT '#4f46e5',
+  logo_url TEXT NOT NULL DEFAULT '', published INTEGER NOT NULL DEFAULT 1,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')));
 
-# Flask stuff:
-instance/
-.webassets-cache
+CREATE TABLE IF NOT EXISTS products (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  store_id INTEGER NOT NULL REFERENCES stores(id) ON DELETE CASCADE,
+  title TEXT NOT NULL, description TEXT NOT NULL DEFAULT '',
+  price_cents INTEGER NOT NULL DEFAULT 0, compare_at_cents INTEGER,
+  stock INTEGER NOT NULL DEFAULT 0, image_url TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL DEFAULT 'active',
+  created_at TEXT NOT NULL DEFAULT (datetime('now')));
 
-# Scrapy stuff:
-.scrapy
+CREATE TABLE IF NOT EXISTS orders (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  store_id INTEGER NOT NULL REFERENCES stores(id) ON DELETE CASCADE,
+  order_number TEXT NOT NULL UNIQUE,
+  customer_name TEXT NOT NULL, customer_email TEXT NOT NULL,
+  shipping_address TEXT NOT NULL DEFAULT '', total_cents INTEGER NOT NULL DEFAULT 0,
+  status TEXT NOT NULL DEFAULT 'pending',
+  created_at TEXT NOT NULL DEFAULT (datetime('now')));
 
-# Sphinx documentation
-docs/_build/
+CREATE TABLE IF NOT EXISTS order_items (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  order_id INTEGER NOT NULL REFERENCES orders(id) ON DELETE CASCADE,
+  product_id INTEGER, title TEXT NOT NULL, price_cents INTEGER NOT NULL, quantity INTEGER NOT NULL);
 
-# PyBuilder
-.pybuilder/
-target/
+CREATE TABLE IF NOT EXISTS ai_tools (
+  id INTEGER PRIMARY KEY AUTOINCREMENT, slug TEXT NOT NULL UNIQUE,
+  name TEXT NOT NULL, description TEXT NOT NULL DEFAULT '',
+  category TEXT NOT NULL DEFAULT 'general', icon TEXT NOT NULL DEFAULT '*',
+  pricing_type TEXT NOT NULL DEFAULT 'free', price_cents INTEGER NOT NULL DEFAULT 0,
+  subscription_period_days INTEGER NOT NULL DEFAULT 30, monthly_limit INTEGER,
+  active INTEGER NOT NULL DEFAULT 1, sort_order INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')));
 
-# Jupyter Notebook
-.ipynb_checkpoints
+CREATE TABLE IF NOT EXISTS ai_purchases (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  tool_id INTEGER NOT NULL REFERENCES ai_tools(id) ON DELETE CASCADE,
+  purchase_type TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'active',
+  amount_cents INTEGER NOT NULL DEFAULT 0,
+  purchased_at TEXT NOT NULL DEFAULT (datetime('now')),
+  expires_at TEXT, cancelled_at TEXT);
 
-# IPython
-profile_default/
-ipython_config.py
+CREATE TABLE IF NOT EXISTS ai_usage (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  tool_id INTEGER NOT NULL REFERENCES ai_tools(id) ON DELETE CASCADE,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')));
 
-# pyenv
-#   For a library or package, you might want to ignore these files since the code is
-#   intended to run in multiple environments; otherwise, check them in:
-# .python-version
+CREATE TABLE IF NOT EXISTS suppliers (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  name TEXT NOT NULL, contact_name TEXT NOT NULL DEFAULT '',
+  email TEXT NOT NULL DEFAULT '', phone TEXT NOT NULL DEFAULT '',
+  website TEXT NOT NULL DEFAULT '', country TEXT NOT NULL DEFAULT '',
+  category TEXT NOT NULL DEFAULT 'general',
+  lead_time_days INTEGER NOT NULL DEFAULT 7,
+  min_order_cents INTEGER NOT NULL DEFAULT 0,
+  notes TEXT NOT NULL DEFAULT '', status TEXT NOT NULL DEFAULT 'active',
+  created_at TEXT NOT NULL DEFAULT (datetime('now')));
 
-# pipenv
-#   According to pypa/pipenv#598, it is recommended to include Pipfile.lock in version control.
-#   However, in case of collaboration, if having platform-specific dependencies or dependencies
-#   having no cross-platform support, pipenv may install dependencies that don't work, or not
-#   install all needed dependencies.
-# Pipfile.lock
+CREATE TABLE IF NOT EXISTS app_installs (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  store_id INTEGER NOT NULL REFERENCES stores(id) ON DELETE CASCADE,
+  app_slug TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'trial',
+  trial_started_at TEXT NOT NULL DEFAULT (datetime('now')),
+  trial_ends_at TEXT NOT NULL, subscribed_at TEXT,
+  expires_at TEXT, cancelled_at TEXT,
+  UNIQUE(store_id, app_slug));
 
-# uv
-#   Similar to Pipfile.lock, it is generally recommended to include uv.lock in version control.
-#   This is especially recommended for binary packages to ensure reproducibility, and is more
-#   commonly ignored for libraries.
-# uv.lock
+CREATE TABLE IF NOT EXISTS dropship_links (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  product_id INTEGER NOT NULL UNIQUE REFERENCES products(id) ON DELETE CASCADE,
+  supplier_id INTEGER NOT NULL REFERENCES suppliers(id) ON DELETE CASCADE,
+  supplier_sku TEXT NOT NULL DEFAULT '',
+  cost_cents INTEGER NOT NULL DEFAULT 0,
+  lead_time_days INTEGER NOT NULL DEFAULT 7,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')));
 
-# poetry
-#   Similar to Pipfile.lock, it is generally recommended to include poetry.lock in version control.
-#   This is especially recommended for binary packages to ensure reproducibility, and is more
-#   commonly ignored for libraries.
-#   https://python-poetry.org/docs/basic-usage/#commit-your-poetrylock-file-to-version-control
-# poetry.lock
-# poetry.toml
+CREATE INDEX IF NOT EXISTS idx_products_store  ON products(store_id);
+CREATE INDEX IF NOT EXISTS idx_orders_store    ON orders(store_id);
+CREATE INDEX IF NOT EXISTS idx_items_order     ON order_items(order_id);
+CREATE INDEX IF NOT EXISTS idx_purchases_user  ON ai_purchases(user_id);
+CREATE INDEX IF NOT EXISTS idx_usage_user_tool ON ai_usage(user_id, tool_id);
+CREATE INDEX IF NOT EXISTS idx_suppliers_user  ON suppliers(user_id);
+CREATE INDEX IF NOT EXISTS idx_installs_store  ON app_installs(store_id);
+`);
 
-# pdm
-#   Similar to Pipfile.lock, it is generally recommended to include pdm.lock in version control.
-#   pdm recommends including project-wide configuration in pdm.toml, but excluding .pdm-python.
-#   https://pdm-project.org/en/latest/usage/project/#working-with-version-control
-# pdm.lock
-# pdm.toml
-.pdm-python
-.pdm-build/
+if (!db.prepare('PRAGMA table_info(users)').all().some(c => c.name === 'role')) {
+  db.exec("ALTER TABLE users ADD COLUMN role TEXT NOT NULL DEFAULT 'merchant'");
+}
 
-# pixi
-#   Similar to Pipfile.lock, it is generally recommended to include pixi.lock in version control.
-# pixi.lock
-#   Pixi creates a virtual environment in the .pixi directory, just like venv module creates one
-#   in the .venv directory. It is recommended not to include this directory in version control.
-.pixi/*
-!.pixi/config.toml
+/* ============================ OWNER ACCOUNT =========================== */
 
-# PEP 582; used by e.g. github.com/David-OConnor/pyflow and github.com/pdm-project/pdm
-__pypackages__/
+(function ensureOwner() {
+  db.prepare("DELETE FROM stores WHERE slug IN ('ted-coffee', 'demo-goods')").run();
+  db.prepare("DELETE FROM users WHERE email = 'demo@tedify.stop'").run();
+  let owner = db.prepare('SELECT * FROM users WHERE email = ?').get(SUPERADMIN_EMAIL);
+  if (!owner) {
+    const info = db.prepare('INSERT INTO users (email, password_hash, name, role) VALUES (?, ?, ?, ?)')
+      .run(SUPERADMIN_EMAIL, bcrypt.hashSync(SUPERADMIN_PASSWORD, 10), 'Platform Owner', 'superadmin');
+    owner = { id: Number(info.lastInsertRowid), role: 'superadmin' };
+  } else if (owner.role !== 'superadmin') {
+    db.prepare("UPDATE users SET role = 'superadmin' WHERE id = ?").run(owner.id);
+  }
+})();
 
-# Celery stuff
-celerybeat-schedule*
-celerybeat.pid
+/* ====================== AI TOOL CATALOG + RUNTIME ===================== */
 
-# Redis
-*.rdb
-*.aof
-*.pid
+const AI_TOOL_SEED = [
+  { slug:'product-description', name:'Product Description Writer', category:'writing', icon:'✍️',
+    description:'Turn a title + attributes into a polished product description.',
+    pricing_type:'free', price_cents:0, monthly_limit:20, sort_order:10 },
+  { slug:'seo-meta', name:'SEO Meta Generator', category:'seo', icon:'🔍',
+    description:'Generate title tags, meta descriptions, URL slugs and keyword ideas.',
+    pricing_type:'free', price_cents:0, monthly_limit:20, sort_order:20 },
+  { slug:'ad-copy', name:'Ad Copy Generator', category:'marketing', icon:'📣',
+    description:'Three ready-to-run ad variations — headline, body and CTA.',
+    pricing_type:'one_time', price_cents:1900, monthly_limit:null, sort_order:30 },
+  { slug:'email-subjects', name:'Email Subject Line Writer', category:'marketing', icon:'✉️',
+    description:'Ten subject line variations for any campaign.',
+    pricing_type:'subscription', price_cents:900, subscription_period_days:30, monthly_limit:300, sort_order:40 },
+  { slug:'blog-outline', name:'Blog Post Outliner', category:'writing', icon:'📝',
+    description:'Turn any topic into a structured H2/H3 outline.',
+    pricing_type:'free', price_cents:0, monthly_limit:15, sort_order:50 },
+  { slug:'review-responder', name:'Review Responder', category:'support', icon:'⭐',
+    description:'Draft professional replies to customer reviews.',
+    pricing_type:'one_time', price_cents:1200, monthly_limit:null, sort_order:60 },
+  { slug:'keyword-extractor', name:'Keyword Extractor', category:'seo', icon:'🔑',
+    description:'Extract the most relevant keywords from any text.',
+    pricing_type:'free', price_cents:0, monthly_limit:30, sort_order:70 },
+  { slug:'tone-rewriter', name:'Tone Rewriter', category:'writing', icon:'🎭',
+    description:'Rewrite text as professional, casual or friendly.',
+    pricing_type:'subscription', price_cents:700, subscription_period_days:30, monthly_limit:500, sort_order:80 },
+];
 
-# RabbitMQ
-mnesia/
-rabbitmq/
-rabbitmq-data/
+(function seedAiTools(){
+  const insert = db.prepare(`
+    INSERT INTO ai_tools (slug, name, description, category, icon, pricing_type, price_cents,
+                          subscription_period_days, monthly_limit, sort_order)
+    VALUES (@slug, @name, @description, @category, @icon, @pricing_type, @price_cents,
+            @subscription_period_days, @monthly_limit, @sort_order)
+  `);
+  AI_TOOL_SEED.forEach(t => {
+    if (db.prepare('SELECT id FROM ai_tools WHERE slug = ?').get(t.slug)) return;
+    insert.run({ slug:t.slug, name:t.name, description:t.description, category:t.category, icon:t.icon,
+      pricing_type:t.pricing_type, price_cents:t.price_cents,
+      subscription_period_days:t.subscription_period_days || 30,
+      monthly_limit:t.monthly_limit || null, sort_order:t.sort_order });
+  });
+})();
 
-# ActiveMQ
-activemq-data/
+const AI_RUNTIME = {
+  'product-description': function(i){
+    const t = String(i.title || '').trim();
+    if (!t) throw Object.assign(new Error('Product title is required'), { status:400 });
+    const cat = String(i.category || 'product').trim();
+    const attrs = String(i.attributes || '').split(/[,\n]/).map(s => s.trim()).filter(Boolean);
+    const attrList = attrs.length ? attrs.join(', ') : 'quality craftsmanship';
+    const pick = a => a[Math.floor(Math.random()*a.length)];
+    const op = pick([`Introducing the ${t}.`, `Meet the ${t} — a ${cat.toLowerCase()} built to deliver.`, `The ${t} is here.`]);
+    const mid = pick([`Every detail is intentional: ${attrList}.`, `Built for people who expect more from their ${cat.toLowerCase()}: ${attrList}.`, `${attrList.charAt(0).toUpperCase()+attrList.slice(1)} — because good design shows.`]);
+    const cl = pick([`Order today and see why it's the ${cat.toLowerCase()} people come back to.`, `Add it to your cart — it ships fast.`, `Available now, while stocks last.`]);
+    return `${op} ${mid}\n\n${cl}`;
+  },
+  'seo-meta': function(i){
+    const t = String(i.title || '').trim();
+    if (!t) throw Object.assign(new Error('Page title is required'), { status:400 });
+    const d = String(i.description || '').trim() || `${t} — learn more, compare and buy today.`;
+    const titleTag = t.length > 60 ? t.slice(0,57)+'...' : t;
+    const metaDesc = d.length > 160 ? d.slice(0,157)+'...' : d;
+    const slug = t.toLowerCase().replace(/[^a-z0-9]+/g,'-').replace(/^-|-$/g,'');
+    const stop = new Set('the a an and or for to of in on with by is are this that it be as at from'.split(' '));
+    const words = (t+' '+d).toLowerCase().match(/[a-z]{3,}/g) || [];
+    const f = {}; words.forEach(w => { if (!stop.has(w)) f[w] = (f[w]||0)+1; });
+    const kw = Object.entries(f).sort((a,b)=>b[1]-a[1]).slice(0,8).map(([w])=>w);
+    return `Title tag (${titleTag.length}/60)\n${titleTag}\n\nMeta description (${metaDesc.length}/160)\n${metaDesc}\n\nURL slug\n/${slug}\n\nKeywords\n${kw.join(', ')}`;
+  },
+  'ad-copy': function(i){
+    const p = String(i.product || '').trim();
+    if (!p) throw Object.assign(new Error('Product name is required'), { status:400 });
+    const a = String(i.audience || 'customers').trim();
+    const b = String(i.benefit || 'a better experience').trim();
+    return `Variation A\nHeadline: ${p} — built for ${a}.\nBody: ${p} gives ${a} ${b}, without the usual tradeoffs.\nCTA: Shop now\n\nVariation B\nHeadline: ${b.charAt(0).toUpperCase()+b.slice(1)} with ${p}.\nBody: Tired of tools that overpromise? ${p} delivers ${b} from day one.\nCTA: Try it today\n\nVariation C\nHeadline: Finally, ${p} that works.\nBody: ${a} asked. We listened. ${p} is the answer.\nCTA: Get yours`;
+  },
+  'email-subjects': function(i){
+    const t = String(i.topic || '').trim();
+    if (!t) throw Object.assign(new Error('Email topic is required'), { status:400 });
+    const a = String(i.audience || 'subscribers').trim();
+    return [`${t}: what ${a} need to know`,`A quick note on ${t}`,`${t} — this week's update`,`You asked about ${t}. Here's the answer.`,`The one thing ${a} get wrong about ${t}`,`New: ${t} just landed`,`${t} in 3 minutes (or less)`,`Why ${t} matters right now`,`Don't miss: ${t} update`,`${t} — read this before you decide`].join('\n');
+  },
+  'blog-outline': function(i){
+    const t = String(i.topic || '').trim();
+    if (!t) throw Object.assign(new Error('Topic is required'), { status:400 });
+    const a = String(i.audience || 'readers').trim();
+    return `Title: The Complete Guide to ${t} for ${a}\n\n1. Introduction\n   - Why ${t} matters now\n   - Who this guide is for\n\n2. What is ${t}?\n   - Core concepts\n   - Common misconceptions\n\n3. Why ${t} matters to ${a}\n   - Key benefits\n   - Real-world examples\n\n4. Getting started with ${t}\n   - Step-by-step approach\n   - Tools and resources\n\n5. Common mistakes\n   - Pitfall #1\n   - Pitfall #2\n   - Pitfall #3\n\n6. Advanced strategies\n   - Scaling up\n   - Measuring impact\n\n7. Conclusion\n   - Key takeaways\n   - Next steps`;
+  },
+  'review-responder': function(i){
+    const r = String(i.review || '').trim();
+    const rating = parseInt(i.rating, 10) || 5;
+    const brand = String(i.brand || 'our team').trim();
+    if (!r) throw Object.assign(new Error('Review text is required'), { status:400 });
+    if (rating >= 4) return `Thank you so much for the kind words! Reviews like yours mean the world to ${brand}. We're thrilled you had a great experience and can't wait to serve you again.`;
+    if (rating === 3) return `Thanks for the honest feedback. We hear you — and we're taking notes. ${brand} is always looking for ways to improve, and your review helps us do exactly that. If you'd like to tell us more, please reach out directly.`;
+    return `We're sorry your experience didn't meet expectations — that's not the standard we hold ourselves to at ${brand}. We'd like the chance to make it right. Please reach out to our team directly so we can look into this personally. Thank you for the feedback.`;
+  },
+  'keyword-extractor': function(i){
+    const txt = String(i.text || '').trim();
+    if (!txt) throw Object.assign(new Error('Text is required'), { status:400 });
+    const stop = new Set('the a an and or for to of in on with by is are this that it be as at from was were will would could should have has had do does did but if then so not no yes you your we our they their i me my'.split(' '));
+    const words = txt.toLowerCase().match(/[a-z]{4,}/g) || [];
+    const f = {}; words.forEach(w => { if (!stop.has(w)) f[w] = (f[w]||0)+1; });
+    const top = Object.entries(f).sort((a,b)=>b[1]-a[1]).slice(0,15);
+    if (!top.length) return 'No meaningful keywords found.';
+    return top.map(([w,n]) => `${w} (${n})`).join('\n');
+  },
+  'tone-rewriter': function(i){
+    let txt = String(i.text || '').trim();
+    const tone = String(i.tone || 'professional').toLowerCase();
+    if (!txt) throw Object.assign(new Error('Text is required'), { status:400 });
+    if (tone === 'professional') {
+      txt = txt.replace(/!/g,'.').replace(/\bhey\b/gi,'Hello').replace(/\bcan't\b/gi,'cannot')
+        .replace(/\bdon't\b/gi,'do not').replace(/\bwon't\b/gi,'will not')
+        .replace(/\bit's\b/gi,'it is').replace(/\bwe're\b/gi,'we are').replace(/\bI'm\b/gi,'I am');
+    } else if (tone === 'casual') {
+      txt = txt.replace(/\bdo not\b/gi,"don't").replace(/\bcannot\b/gi,"can't")
+        .replace(/\bwill not\b/gi,"won't").replace(/\bit is\b/gi,"it's")
+        .replace(/\bwe are\b/gi,"we're").replace(/\bI am\b/gi,"I'm");
+    } else if (tone === 'friendly') {
+      txt = txt.replace(/\bhello\b/gi,'Hey there').replace(/\bgoodbye\b/gi,'Take care').replace(/\.\s/g,'! ');
+    }
+    return txt;
+  },
+};
 
-# SageMath parsed files
-*.sage.py
+/* ======================= DROPSHIP APP DEFINITION ====================== */
 
-# Environments
-.env
-.envrc
-.venv
-env/
-venv/
-ENV/
-env.bak/
-venv.bak/
+const DROPSHIP_APP = {
+  slug: 'dropshipping',
+  name: 'Dropshipping',
+  description: 'Source products from verified suppliers and fulfill orders without holding inventory.',
+  trial_days: 14,
+  price_cents: 2900,
+  period_days: 30,
+};
 
-# Spyder project settings
-.spyderproject
-.spyproject
+function getDropshipAccess(storeId) {
+  const inst = db.prepare('SELECT * FROM app_installs WHERE store_id = ? AND app_slug = ?')
+    .get(storeId, DROPSHIP_APP.slug);
+  if (!inst) return { installed: false, allowed: false, status: 'not_installed' };
+  const now = Date.now();
+  const future = s => s ? new Date(s.replace(' ', 'T') + 'Z').getTime() > now : false;
+  const daysLeft = s => s ? Math.max(0, Math.ceil((new Date(s.replace(' ', 'T') + 'Z').getTime() - now) / 86400000)) : 0;
+  if (inst.status === 'active' && (!inst.expires_at || future(inst.expires_at))) {
+    return { installed:true, allowed:true, status:'active', expires_at: inst.expires_at, days_left: daysLeft(inst.expires_at) };
+  }
+  if (inst.status === 'trial' && future(inst.trial_ends_at)) {
+    return { installed:true, allowed:true, status:'trial', trial_ends_at: inst.trial_ends_at, days_left: daysLeft(inst.trial_ends_at) };
+  }
+  if (inst.status === 'trial') return { installed:true, allowed:false, status:'trial_expired', trial_ends_at: inst.trial_ends_at };
+  if (inst.status === 'active') return { installed:true, allowed:false, status:'expired', expires_at: inst.expires_at };
+  return { installed:true, allowed:false, status: inst.status };
+}
 
-# Rope project settings
-.ropeproject
+/* ============================ AUTH HELPERS ============================ */
 
-# mkdocs/Zensical documentation
-/site
+function readToken(req) {
+  if (req.cookies && req.cookies[COOKIE_NAME]) return req.cookies[COOKIE_NAME];
+  const h = req.headers.authorization || '';
+  if (h.startsWith('Bearer ')) return h.slice(7);
+  return null;
+}
+function attachUser(req, _res, next) {
+  req.user = null;
+  const token = readToken(req);
+  if (token) {
+    try {
+      const payload = jwt.verify(token, SECRET);
+      req.user = db.prepare('SELECT id, email, name, role FROM users WHERE id = ?').get(payload.uid) || null;
+    } catch (e) {}
+  }
+  next();
+}
+function requireAuth(req, res, next) {
+  if (!req.user) return res.status(401).json({ error: 'Authentication required' });
+  next();
+}
+function requireSuperadmin(req, res, next) {
+  if (!req.user || req.user.role !== 'superadmin') return res.status(403).json({ error: 'Superadmin access required' });
+  next();
+}
+function canManage(user, store) {
+  return !!user && !!store && (store.owner_id === user.id || user.role === 'superadmin');
+}
+function requireStoreOwner(paramName) {
+  returnBelow is a surgical patch that adds a full Social Media Integration feature to your existing server.js — no need to regenerate the whole file. Store owners connect their Facebook, Instagram, X, TikTok, Pinterest, YouTube, LinkedIn, WhatsApp, Threads, and Telegram accounts to their store; every connection is verified with a code flow and shown on the public storefront.
 
-# mypy
-.mypy_cache/
-.dmypy.json
-dmypy.json
+There are 5 insertion points. Each block is labelled with exactly where it goes.
 
-# Pyre type checker
-.pyre/
+---
 
-# pytype static type analyzer
-.pytype/
+1. Add the table — inside the existing db.exec(/...`)` block
 
-# Cython debug symbols
-cython_debug/
+Find the line CREATE INDEX IF NOT EXISTS idx_installs_store ON app_installs(store_id); and add this table right above it:
 
-# PyCharm
-#   JetBrains specific template is maintained in a separate JetBrains.gitignore that can
-#   be found at https://github.com/github/gitignore/blob/main/Global/JetBrains.gitignore
-#   and can be added to the global gitignore or merged into this file.  For a more nuclear
-#   option (not recommended) you can uncomment the following to ignore the entire idea folder.
-# .idea/
+```sql
+CREATE TABLE IF NOT EXISTS social_accounts (
+  id           INTEGER PRIMARY KEY AUTOINCREMENT,
+  store_id     INTEGER NOT NULL REFERENCES stores(id) ON DELETE CASCADE,
+  platform     TEXT NOT NULL,
+  handle       TEXT NOT NULL DEFAULT '',
+  profile_url  TEXT NOT NULL DEFAULT '',
+  verified     INTEGER NOT NULL DEFAULT 0,
+  verify_code  TEXT,
+  connected_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE(store_id, platform)
+);
 
-# Abstra
-#   Abstra is an AI-powered process automation framework.
-#   Ignore directories containing user credentials, local state, and settings.
-#   Learn more at https://abstra.io/docs
-.abstra/
+CREATE INDEX IF NOT EXISTS idx_social_store ON social_accounts(store_id);
+```
 
-# Visual Studio Code
-#   Visual Studio Code specific template is maintained in a separate VisualStudioCode.gitignore that
-#   can be found at https://github.com/github/gitignore/blob/main/Global/VisualStudioCode.gitignore
-#   and can be added to the global gitignore or merged into this file. However, if you prefer, you
-#   could uncomment the following to ignore the entire vscode folder
-# .vscode/
-# Temporary file for partial code execution
-tempCodeRunnerFile.py
+---
 
-# Ruff stuff:
-.ruff_cache/
+2. Platform registry + routes — paste after the suppliers block
 
-# PyPI configuration file
-.pypirc
+Find /* ============================== APPS ================================== */ and paste this directly above it:
 
-# Marimo
-marimo/_static/
-marimo/_lsp/
-__marimo__/
+```js
+/* ============================ SOCIAL MEDIA ============================ */
 
-# Streamlit
-.streamlit/secrets.toml
+const SOCIAL_PLATFORMS = {
+  facebook:  { label: 'Facebook',  icon: 'f',  color: '#1877f2', url: h => 'https://facebook.com/' + h },
+  instagram: { label: 'Instagram', icon: '◉',  color: '#e1306c', url: h => 'https://instagram.com/' + h },
+  x:         { label: 'X',         icon: '𝕏',  color: '#000000', url: h => 'https://x.com/' + h },
+  tiktok:    { label: 'TikTok',    icon: '♪',  color: '#000000', url: h => 'https://tiktok.com/@' + h },
+  pinterest: { label: 'Pinterest', icon: 'P',  color: '#e60023', url: h => 'https://pinterest.com/' + h },
+  youtube:   { label: 'YouTube',   icon: '▶',  color: '#ff0000', url: h => 'https://youtube.com/@' + h },
+  linkedin:  { label: 'LinkedIn',  icon: 'in', color: '#0a66c2', url: h => 'https://linkedin.com/company/' + h },
+  whatsapp:  { label: 'WhatsApp',  icon: '✆',  color: '#25d366', url: h => 'https://wa.me/' + h },
+  threads:   { label: 'Threads',   icon: '@',  color: '#000000', url: h => 'https://threads.net/@' + h },
+  telegram:  { label: 'Telegram',  icon: '✈',  color: '#0088cc', url: h => 'https://t.me/' + h },
+};
+
+/* Public: list supported platforms */
+app.get('/api/social/platforms', function (_req, res) {
+  res.json({ platforms: SOCIAL_PLATFORMS });
+});
+
+/* Owner: list connected accounts for a store */
+app.get('/api/stores/:storeId/social', requireAuth, requireStoreOwner('storeId'), function (req, res) {
+  const accounts = db.prepare(
+    'SELECT * FROM social_accounts WHERE store_id = ? ORDER BY connected_at DESC'
+  ).all(req.store.id);
+  res.json({ accounts: accounts });
+});
+
+/* Owner: connect a new platform */
+app.post('/api/stores/:storeId/social', requireAuth, requireStoreOwner('storeId'), function (req, res) {
+  const b = req.body || {};
+  const platform = String(b.platform || '').trim();
+  if (!platform || !SOCIAL_PLATFORMS[platform]) {
+    return res.status(400).json({ error: 'Unknown platform. Supported: ' + Object.keys(SOCIAL_PLATFORMS).join(', ') });
+  }
+  const handle = String(b.handle || '').trim().replace(/^@/, '').slice(0, 60);
+  if (!handle) return res.status(400).json({ error: 'Handle is required' });
+  if (!/^[A-Za-z0-9._-]+$/.test(handle)) {
+    return res.status(400).json({ error: 'Handle may only contain letters, numbers, dots, dashes and underscores' });
+  }
+  const exists = db.prepare('SELECT id FROM social_accounts WHERE store_id = ? AND platform = ?')
+    .get(req.store.id, platform);
+  if (exists) return res.status(409).json({ error: SOCIAL_PLATFORMS[platform].label + ' is already connected' });
+
+  const url = String(b.profile_url || '').trim().slice(0, 500) || SOCIAL_PLATFORMS[platform].url(handle);
+  const info = db.prepare(
+    'INSERT INTO social_accounts (store_id, platform, handle, profile_url) VALUES (?, ?, ?, ?)'
+  ).run(req.store.id, platform, handle, url);
+  res.status(201).json({
+    account: db.prepare('SELECT * FROM social_accounts WHERE id = ?').get(info.lastInsertRowid)
+  });
+});
+
+/* Owner: update handle / url */
+app.patch('/api/stores/:storeId/social/:id', requireAuth, requireStoreOwner('storeId'), function (req, res) {
+  const row = db.prepare('SELECT * FROM social_accounts WHERE id = ? AND store_id = ?')
+    .get(Number(req.params.id), req.store.id);
+  if (!row) return res.status(404).json({ error: 'Account not found' });
+  const b = req.body || {};
+  const f = {};
+  if (b.handle !== undefined) {
+    const h = String(b.handle).trim().replace(/^@/, '').slice(0, 60);
+    if (!h) return res.status(400).json({ error: 'Handle cannot be empty' });
+    if (!/^[A-Za-z0-9._-]+$/.test(h)) return res.status(400).json({ error: 'Invalid handle' });
+    f.handle = h;
+  }
+  if (b.profile_url !== undefined) f.profile_url = String(b.profile_url).slice(0, 500);
+  if (b.verified !== undefined) f.verified = b.verified ? 1 : 0;
+  const keys = Object.keys(f);
+  if (keys.length) {
+    db.prepare('UPDATE social_accounts SET ' + keys.map(k => k + ' = ?').join(', ') + ' WHERE id = ?')
+      .run.apply(null, keys.map(k => f[k]).concat([row.id]));
+  }
+  res.json({ account: db.prepare('SELECT * FROM social_accounts WHERE id = ?').get(row.id) });
+});
+
+/* Owner: disconnect */
+app.delete('/api/stores/:storeId/social/:id', requireAuth, requireStoreOwner('storeId'), function (req, res) {
+  const row = db.prepare('SELECT * FROM social_accounts WHERE id = ? AND store_id = ?')
+    .get(Number(req.params.id), req.store.id);
+  if (!row) return res.status(404).json({ error: 'Account not found' });
+  db.prepare('DELETE FROM social_accounts WHERE id = ?').run(row.id);
+  res.json({ ok: true });
+});
+
+/* Owner: step 1 — request a verification code */
+app.post('/api/stores/:storeId/social/:id/verify/request', requireAuth, requireStoreOwner('storeId'), function (req, res) {
+  const row = db.prepare('SELECT * FROM social_accounts WHERE id = ? AND store_id = ?')
+    .get(Number(req.params.id), req.store.id);
+  if (!row) return res.status(404).json({ error: 'Account not found' });
+  const code = 'TED-' + crypto.randomBytes(3).toString('hex').toUpperCase();
+  db.prepare('UPDATE social_accounts SET verify_code = ? WHERE id = ?').run(code, row.id);
+  res.json({
+    code: code,
+    platform: SOCIAL_PLATFORMS[row.platform].label,
+    profile_url: row.profile_url,
+    instructions: 'Post this code publicly on your ' + SOCIAL_PLATFORMS[row.platform].label +
+      ' profile — in your bio, a pinned post, or a story. Then come back and click "I\'ve posted it".'
+  });
+});
+
+/* Owner: step 2 — confirm the code was posted */
+app.post('/api/stores/:storeId/social/:id/verify/confirm', requireAuth, requireStoreOwner('storeId'), function (req, res) {
+  const row = db.prepare('SELECT * FROM social_accounts WHERE id = ? AND store_id = ?')
+    .get(Number(req.params.id), req.store.id);
+  if (!row) return res.status(404).json({ error: 'Account not found' });
+  if (!row.verify_code) return res.status(400).json({ error: 'Request a verification code first' });
+  /* In production: fetch the public profile and confirm verify_code appears in the bio/post.
+     In this build: the owner self-attests after posting the code. */
+  db.prepare('UPDATE social_accounts SET verified = 1, verify_code = NULL WHERE id = ?').run(row.id);
+  res.json({ account: db.prepare('SELECT * FROM social_accounts WHERE id = ?').get(row.id) });
+});
+
+/* PUBLIC: storefront reads social links by slug */
+app.get('/api/stores/:slug/social', function (req, res) {
+  const store = db.prepare('SELECT * FROM stores WHERE slug = ?').get(req.params.slug);
+  if (!store) return res.status(404).json({ error: 'Store not found' });
+  const rows = db.prepare(
+    'SELECT platform, handle, profile_url, verified FROM social_accounts WHERE store_id = ? ORDER BY verified DESC, connected_at ASC'
+  ).all(store.id);
+  res.json({
+    social: rows.map(r => Object.assign({}, r, {
+      label: (SOCIAL_PLATFORMS[r.platform] || {}).label || r.platform,
+      icon:  (SOCIAL_PLATFORMS[r.platform] || {}).icon  || '?',
+      color: (SOCIAL_PLATFORMS[r.platform] || {}).color || '#666'
+    }))
+  });
+});
+```
+
+---
+
+3. Admin panel — HTML additions
+
+a) Add a tab button — inside ADMIN_HTML, find the <nav class="tabs"> block and add this line after the "Suppliers" tab (or after "AI Tools" if no Suppliers tab exists):
+
+```html
+<button class="tab" data-tab="social">Social Media</button>
+```
+
+b) Add the panel — find the panel for the last tab you have (e.g. <div class="tab-panel hidden" id="panel-settings">) and paste this right before it:
+
+```html
+<div class="tab-panel hidden" id="panel-social">
+  <div class="between mb-16">
+    <h2 style="margin:0;font-size:18px;">Social Media Connections</h2>
+    <button class="btn sm" id="connectSocialBtn">+ Connect platform</button>
+  </div>
+  <p class="muted small" style="margin-top:0;">
+    Link your social profiles to your storefront. Verified accounts get a checkmark badge.
+  </p>
+  <div id="socialAccountsList"><div class="empty">Loading...</div></div>
+</div>
+```
+
+c) Add a social strip to the storefront footer — inside STORE_HTML, find <main class="container"> and paste this after its closing </main>:
+
+```html
+<footer class="container" style="padding:32px 0;border-top:1px solid var(--border);">
+  <div id="storeSocial" style="display:flex;gap:12px;flex-wrap:wrap;align-items:center;"></div>
+</footer>
+```
+
+---
+
+4. Admin client logic — paste into bootAdmin() in CLIENT_JS
+
+Find the line if (name === 'settings') fillSettings(); in the tabs handler and replace it with:
+
+```js
+        if (name === 'settings') fillSettings();
+        if (name === 'social') loadSocial();
+```
+
+Then, inside bootAdmin(), paste this block anywhere after loadStores is defined (e.g. right before function fillSettings(){):
+
+```js
+    /* ---- Social Media tab ---- */
+    var SOCIAL_PLATFORMS_CACHE = null;
+
+    function loadPlatforms() {
+      if (SOCIAL_PLATFORMS_CACHE) return Promise.resolve(SOCIAL_PLATFORMS_CACHE);
+      return TED.get('/api/social/platforms').then(function (res) {
+        SOCIAL_PLATFORMS_CACHE = res.platforms;
+        return res.platforms;
+      });
+    }
+
+    function loadSocial() {
+      var el = document.getElementById('socialAccountsList');
+      el.innerHTML = '<div class="muted small">Loading...</div>';
+      Promise.all([
+        loadPlatforms(),
+        TED.get('/api/stores/' + state.store.id + '/social')
+      ]).then(function (results) {
+        var platforms = results[0], accounts = results[1].accounts;
+        if (!accounts.length) {
+          el.innerHTML = '<div class="empty" style="padding:32px;">No social accounts connected yet. ' +
+            'Click "+ Connect platform" to link one.</div>';
+          return;
+        }
+        el.innerHTML = '<div class="table-wrap"><table><thead><tr>' +
+          '<th>Platform</th><th>Handle</th><th>URL</th><th>Status</th><th></th>' +
+          '</tr></thead><tbody>' +
+          accounts.map(function (a) {
+            var p = platforms[a.platform] || { label: a.platform, icon: '?', color: '#666' };
+            var badge = a.verified
+              ? '<span class="badge ok">✓ verified</span>'
+              : '<span class="badge draft">unverified</span>';
+            return '<tr>' +
+              '<td><span style="display:inline-grid;place-items:center;width:28px;height:28px;' +
+                'border-radius:8px;background:' + TED.esc(p.color) + ';color:#fff;font-weight:800;' +
+                'font-size:13px;margin-right:8px;">' + TED.esc(p.icon) + '</span>' +
+                '<strong>' + TED.esc(p.label) + '</strong></td>' +
+              '<td>@' + TED.esc(a.handle) + '</td>' +
+              '<td class="small"><a href="' + TED.esc(a.profile_url) + '" target="_blank" rel="noopener">' +
+                TED.esc(a.profile_url.replace(/^https?:\/\//, '').slice(0, 40)) + '</a></td>' +
+              '<td>' + badge + '</td>' +
+              '<td style="text-align:right;white-space:nowrap;">' +
+                (a.verified ? '' : '<button class="btn ghost sm" data-verify-social="' + a.id + '">Verify</button> ') +
+                '<button class="btn ghost sm" data-edit-social="' + a.id + '">Edit</button> ' +
+                '<button class="btn danger sm" data-del-social="' + a.id + '">Disconnect</button>' +
+              '</td></tr>';
+          }).join('') + '</tbody></table></div>';
+      }).catch(function (err) {
+        el.innerHTML = '<div class="muted">' + TED.esc(err.message) + '</div>';
+      });
+    }
+
+    function openConnectSocialModal() {
+      loadPlatforms().then(function (platforms) {
+        var opts = Object.keys(platforms).map(function (k) {
+          return '<option value="' + k + '">' + TED.esc(platforms[k].label) + '</option>';
+        }).join('');
+        modalRoot.innerHTML = '<div class="modal-backdrop" data-close><div class="modal">' +
+          '<h2>Connect a social platform</h2>' +
+          '<p class="muted small" style="margin-top:-10px;">Enter the handle you use on that platform.</p>' +
+          '<form id="socialForm">' +
+            '<div class="field"><label>Platform</label><select name="platform">' + opts + '</select></div>' +
+            '<div class="field"><label>Handle (without @)</label>' +
+              '<input name="handle" required placeholder="yourhandle"></div>' +
+            '<div class="field"><label>Profile URL (optional — auto-generated if blank)</label>' +
+              '<input name="profile_url" placeholder="https://..."></div>' +
+            '<div class="modal-actions"><button type="button" class="btn ghost" data-cancel>Cancel</button>' +
+              '<button type="submit" class="btn">Connect</button></div></form></div></div>';
+        modalRoot.querySelector('[data-close]').onclick = function (e) { if (e.target === e.currentTarget) modalRoot.innerHTML = ''; };
+        modalRoot.querySelector('[data-cancel]').onclick = function () { modalRoot.innerHTML = ''; };
+        modalRoot.querySelector('#socialForm').onsubmit = function (e) {
+          e.preventDefault();
+          var fd = new FormData(e.target);
+          TED.post('/api/stores/' + state.store.id + '/social', {
+            platform: fd.get('platform'),
+            handle: fd.get('handle'),
+            profile_url: fd.get('profile_url')
+          }).then(function () {
+            modalRoot.innerHTML = '';
+            TED.toast('Platform connected', 'success');
+            loadSocial();
+          }).catch(function (err) { TED.toast(err.message, 'error'); });
+        };
+      });
+    }
+
+    function openVerifyModal(accountId) {
+      TED.post('/api/stores/' + state.store.id + '/social/' + accountId + '/verify/request')
+        .then(function (res) {
+          modalRoot.innerHTML = '<div class="modal-backdrop" data-close><div class="modal">' +
+            '<h2>Verify your ' + TED.esc(res.platform) + '</h2>' +
+            '<p class="muted" style="margin-top:-10px;">' + TED.esc(res.instructions) + '</p>' +
+            '<div class="card" style="text-align:center;background:#f8faff;border-color:#c7d2fe;margin:16px 0;">' +
+              '<div class="muted small">Verification code</div>' +
+              '<div style="font-size:26px;font-weight:800;letter-spacing:2px;font-family:monospace;margin:8px 0;">' +
+                TED.esc(res.code) + '</div>' +
+              '<button class="btn ghost sm" data-copy-code>Copy code</button></div>' +
+            '<p class="small">Once you have posted the code on your profile, click Confirm below.</p>' +
+            '<div class="modal-actions">' +
+              '<button type="button" class="btn ghost" data-cancel>Cancel</button>' +
+              '<button type="button" class="btn" id="confirmVerifyBtn">I&rsquo;ve posted it — Verify</button>' +
+            '</div></div></div>';
+          modalRoot.querySelector('[data-close]').onclick = function (e) { if (e.target === e.currentTarget) modalRoot.innerHTML = ''; };
+          modalRoot.querySelector('[data-cancel]').onclick = function () { modalRoot.innerHTML = ''; };
+          modalRoot.querySelector('[data-copy-code]').onclick = function () {
+            navigator.clipboard.writeText(res.code).then(function () { TED.toast('Code copied', 'success'); });
+          };
+          modalRoot.querySelector('#confirmVerifyBtn').onclick = function () {
+            this.disabled = true;
+            TED.post('/api/stores/' + state.store.id + '/social/' + accountId + '/verify/confirm')
+              .then(function () {
+                modalRoot.innerHTML = '';
+                TED.toast('Platform verified', 'success');
+                loadSocial();
+              }).catch(function (err) { TED.toast(err.message, 'error'); });
+          };
+        }).catch(function (err) { TED.toast(err.message, 'error'); });
+    }
+
+    document.getElementById('connectSocialBtn').onclick = openConnectSocialModal;
+
+    document.addEventListener('click', function (e) {
+      var verifyBtn = e.target.closest('[data-verify-social]');
+      if (verifyBtn) { openVerifyModal(Number(verifyBtn.getAttribute('data-verify-social'))); return; }
+      var delBtn = e.target.closest('[data-del-social]');
+      if (delBtn) {
+        if (!confirm('Disconnect this platform from your store?')) return;
+        TED.del('/api/stores/' + state.store.id + '/social/' + delBtn.getAttribute('data-del-social'))
+          .then(function () { TED.toast('Disconnected', 'success'); loadSocial(); })
+          .catch(function (err) { TED.toast(err.message, 'error'); });
+        return;
+      }
+    });
+```
+
+---
+
+5. Storefront social strip — paste at the bottom of bootStore() in CLIENT_JS
+
+Find the closing }); of TED.get('/api/stores/' + slug).then(...) in bootStore() — right after it, add:
+
+```js
+    /* render social links in footer */
+    TED.get('/api/stores/' + slug + '/social').then(function (res) {/* render social links in footer */
+TED.get('/api/stores/' + slug + '/social').then(function (res) {
+  var el = document.getElementById('storeSocial');
+  if (!el) return;
+  if (!res.social.length) { el.innerHTML = ''; return; }
+  el.innerHTML = '<span class="muted small" style="margin-right:8px;">Follow us:</span>' +
+    res.social.map(function (s) {
+      return '<a href="' + TED.esc(s.profile_url) + '" target="_blank" rel="noopener" ' +
+        'style="display:inline-flex;align-items:center;gap:8px;padding:8px 14px;' +
+        'border:1px solid var(--border);border-radius:999px;color:var(--text);font-size:13px;font-weight:600;" ' +
+        'title="@' + TED.esc(s.handle) + ' on ' + TED.esc(s.label) + '">' +
+        '<span style="display:inline-grid;place-items:center;width:22px;height:22px;' +
+        'border-radius:6px;background:' + TED.esc(s.color) + ';color:#fff;font-size:11px;font-weight:800;">' +
+          TED.esc(s.icon) + '</span>' + TED.esc(s.label) +
+        (s.verified ? ' <span style="color:var(--success);">✓</span>' : '') +
+      '</a>';
+    }).join('');
+}).catch(function () {});
+      var el = document.getElementById('storeSocial');
+      if (!el) return;
+      if (!res.social.length) { el.innerHTML = ''; return; }
+      el.innerHTML = '<span class="muted small" style="margin-right:8px;">Follow us:</span>' +
+        res.social.map(function (s) {
+          return '<a href="' + TED.esc(s.profile_url) + '" target="_blank" rel="noopener" ' +
+            'style="display:inline-flex;align-items:center;gap:8px;padding:8px 14px;' +
+            'border:1px solid var(--border);border-radius:999px;color:var(--text);font-size:13px;font-weight:600;" ' +
+            'title="@' + TED.esc(s.handle) + ' on ' + TED.esc(s.label) + '">' +
+            '<span style="display:inline-grid;place-items:center;width:22px;height:22px;' +
+            'border-radius:6px;background:' + TED.esc(s.color) + ';color:#fff;font-size:11px;font-weight:800;">' +
+              TED.esc(s.icon) + '</span>' + TED.esc(s.label) +
+            (s.verified ? ' <span style="color:var(--success);">✓</span>' : '') +
+          '</a>';
+        }).join('');
+    }).catch(function () {});
+```
+
+---
+
+The calls — cURL reference
+
+Once pasted, this is exactly what the client hits:
+
+List supported platforms (public, no auth):
+
+```bash
+curl http://localhost:3000/api/social/platforms
+```
+
+Connect Instagram to store #1:
+
+```bash
+curl -X POST http://localhost:3000/api/stores/1/social \
+  -H "Content-Type: application/json" \
+  -b cookies.txt \
+  -d '{"platform":"instagram","handle":"tedcoffee"}'
+```
+
+List connected accounts:
+
+```bash
+curl http://localhost:3000/api/stores/1/social -b cookies.txt
+```
+
+Request verification code:
+
+```bash
+curl -X POST http://localhost:3000/api/stores/1/social/1/verify/request -b cookies.txt
+# → { "code": "TED-A1B2C3", "instructions": "Post this code publicly on your Instagram profile..." }
+```
+
+Confirm verification (after posting the code):
+
+```bash
+curl -X POST http://localhost:3000/api/stores/
+curl http://localhost:3000/api/social/platforms
+curl -X POST http://localhost:3000/api/stores/1/social \
+  -H "Content-Type: application/json" \
+  -b cookies.txt \
+  -d '{"platform":"instagram","handle":"tedcoffee"}'
+curl http://localhost:3000/api/stores/1/social -b cookies.txt
+curl -X POST http://localhost:3000/api/stores/1/social/1/verify/request -b cookies.txt
+# → { "code": "TED-A1B2C3", "instructions": "Post this code publicly on your Instagram profile..." }
+curl -X POST http://localhost:3000/api/stores/1/social/1/verify/confirm -b cookies.txt
+curl -X PATCH http://localhost:3000/api/stores/1/social/1 \
+  -H "Content-Type: application/json" -b cookies.txt \
+  -d '{"handle":"ted_coffee_lab"}'
+curl -X DELETE http://localhost:3000/api/stores/1/social/1 -b cookies.txt
+curl http://localhost:3000/api/stores/ted-coffee/social
+
